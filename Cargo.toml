@@ -1,0 +1,30 @@
+[package]
+name = "comment_crawler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal"] }
+tracing = "0.1"
+inquire = "0.7"
+anyhow = "1.0"
+grammers-client = { git = "https://github.com/Lonami/grammers" }
+grammers-session = { git = "https://github.com/Lonami/grammers" }
+grammers-tl-types = { git = "https://github.com/Lonami/grammers" }
+grammers-mtsender = { git = "https://github.com/Lonami/grammers" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "fmt"] }
+dotenvy = "0.15"
+clap = { version = "4", features = ["derive", "env"] }
+time = { version = "0.3", default-features = false }
+env_logger = "0.11"
+thiserror = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite"] }
+
+miette = { version = "7", features = ["fancy"] }
+nom = "7"
+nom_locate = "4"
+nom-supreme = "0.8"
+scc = "2.3.3"
+indicatif = { version = "0.17.11", features = ["tokio"] }
+regex = "1.11.1"
+zip = "2.5.0"
