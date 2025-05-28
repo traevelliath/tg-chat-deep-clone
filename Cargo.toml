@@ -1,5 +1,5 @@
 [package]
-name = "comment_crawler"
+name = "tg-chat-deep-clone"
 version = "0.1.0"
 edition = "2021"
 
@@ -28,3 +28,5 @@ scc = "2.3.3"
 indicatif = { version = "0.17.11", features = ["tokio"] }
 regex = "1.11.1"
 zip = "2.5.0"
+rand = "0.9.1"
+futures = "0.3.31"
