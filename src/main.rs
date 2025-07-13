@@ -605,26 +605,28 @@ where
     R: grammers_tl_types::RemoteCall,
 {
     loop {
-        let res: Result<R::Return, grammers_client::InvocationError> =
-            match client.invoke(request).await {
-                Ok(r) => Ok(r),
-                Err(err) => match err {
-                    grammers_client::InvocationError::Rpc(rpc_error)
-                        if rpc_error.name == "FLOOD_WAIT" =>
-                    {
-                        let wait = rpc_error.value.unwrap_or(60) as u64;
-                        tracing::warn!(target: "cc", "FLOOD_WAIT {wait}s while invoking request; retrying");
+        let res: Result<R::Return, grammers_client::InvocationError> = match client
+            .invoke(request)
+            .await
+        {
+            Ok(r) => Ok(r),
+            Err(err) => match err {
+                grammers_client::InvocationError::Rpc(rpc_error)
+                    if rpc_error.name == "FLOOD_WAIT" =>
+                {
+                    let wait = rpc_error.value.unwrap_or(60) as u64;
+                    tracing::warn!(target: "cc", "FLOOD_WAIT {wait}s while invoking request; retrying");
 
-                        tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
-                        continue;
-                    }
-                    err => {
-                        tracing::error!(target: "cc", "Unrecoverable error invoking request: {err}");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                    continue;
+                }
+                err => {
+                    tracing::error!(target: "cc", "Unrecoverable error invoking request: {err}");
 
-                        return Err(err);
-                    }
-                },
-            };
+                    return Err(err);
+                }
+            },
+        };
 
         return res;
     }
@@ -640,17 +642,15 @@ pub async fn download_with_retry(
         let dir_path = format!(".tmp/{}/{}", msg.src_chat_id, msg.post_id);
         tracing::debug!(target: "cc", "Start downloading file {}", msg.id[idx]);
         let download_path = format!("{}/{}", dir_path, item.file_name);
-        match client
-            .download_media(&*item.media, &download_path)
-            .await
-        {
+        match client.download_media(&*item.media, &download_path).await {
             Ok(_) => {
                 tracing::debug!(target: "cc", "Finished downloading file {}", download_path);
 
                 return Ok(download_path);
-            },
+            }
             Err(cause) => {
-                if let Some(inv) = cause.get_ref()
+                if let Some(inv) = cause
+                    .get_ref()
                     .and_then(|boxed| boxed.downcast_ref::<grammers_client::InvocationError>())
                 {
                     if let grammers_client::InvocationError::Rpc(rpc) = inv {
@@ -677,11 +677,11 @@ pub async fn upload_with_retry(
     file_path: &str,
 ) -> anyhow::Result<grammers_client::types::media::Uploaded> {
     loop {
-        let res = client.upload_file(file_path).await;
-        match res {
+        match client.upload_file(file_path).await {
             Ok(media) => return Ok(media),
             Err(cause) => {
-                if let Some(inv) = cause.get_ref()
+                if let Some(inv) = cause
+                    .get_ref()
                     .and_then(|boxed| boxed.downcast_ref::<grammers_client::InvocationError>())
                 {
                     if let grammers_client::InvocationError::Rpc(rpc) = inv {
@@ -721,7 +721,7 @@ pub async fn send_with_retry(
 
                     return Err(anyhow::Error::msg(err));
                 }
-            }
+            },
         }
     }
 }
