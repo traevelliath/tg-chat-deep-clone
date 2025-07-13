@@ -537,7 +537,6 @@ async fn copy_messages(
                         sent_message.id(),
                     )
                     .await?;
-                    break;
                 }
                 Err(err) => return Err(err),
             }
