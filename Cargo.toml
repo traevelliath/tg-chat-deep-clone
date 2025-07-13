@@ -27,6 +27,6 @@ nom-supreme = "0.8"
 scc = "2.3.3"
 indicatif = { version = "0.17.11", features = ["tokio"] }
 regex = "1.11.1"
-zip = "2.5.0"
+zip = "4"
 rand = "0.9.1"
 futures = "0.3.31"

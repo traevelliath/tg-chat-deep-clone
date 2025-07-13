@@ -99,113 +99,120 @@ impl Message {
 
                     pb.inc_length(replies.messages.len() as u64);
 
-                    for message in replies.messages.into_iter().filter_map(|msg| {
-                        if let grammers_tl_types::enums::Message::Message(msg) = msg {
-                            if let Some(grammers_tl_types::enums::MessageMedia::Document(ref d)) =
-                                msg.media
-                            {
-                                if let Some(grammers_tl_types::enums::Document::Document(ref doc)) =
-                                    d.document
+                    for message in replies
+                        .messages
+                        .into_iter()
+                        .filter_map(|msg| {
+                            if let grammers_tl_types::enums::Message::Message(msg) = msg {
+                                if let Some(grammers_tl_types::enums::MessageMedia::Document(ref d)) =
+                                    msg.media
                                 {
-                                    for attr in &doc.attributes {
-                                        if let grammers_tl_types::enums::DocumentAttribute::Filename(
-                                            file,
-                                        ) = attr
-                                        {
-                                            return Some(Message {
-                                                id: msg.id,
-                                                src_chat_id: src_discussion.id,
-                                                dst_chat: dst_discussion.chat.clone(),
-                                                post_id: dst_discussion.request.msg_id,
-                                                data: MessageData::Media (Media {
-                                                    file_name: re.replace_all(&file.file_name, "").to_string(), 
-                                                    grouped_id: msg.grouped_id,
-                                                    media: Box::new(grammers_client::types::Media::from_raw(msg.media.unwrap()).unwrap()),
-                                                    caption: msg.message,
-                                                    mime: MimeType::Doc,
-                                                    entities: msg.entities.unwrap_or_default(),
-                                                }),
-                                                forwarded: false,
-                                            });
+                                    if let Some(grammers_tl_types::enums::Document::Document(ref doc)) =
+                                        d.document
+                                    {
+                                        for attr in &doc.attributes {
+                                            if let grammers_tl_types::enums::DocumentAttribute::Filename(
+                                                file,
+                                            ) = attr
+                                            {
+                                                return Some(Message {
+                                                    id: msg.id,
+                                                    src_chat_id: src_discussion.id,
+                                                    dst_chat: dst_discussion.chat.clone(),
+                                                    post_id: dst_discussion.request.msg_id,
+                                                    data: MessageData::Media (Media {
+                                                        file_name: re.replace_all(&file.file_name, "").to_string(), 
+                                                        grouped_id: msg.grouped_id,
+                                                        media: Box::new(grammers_client::types::Media::from_raw(msg.media.unwrap()).unwrap()),
+                                                        caption: msg.message,
+                                                        mime: MimeType::Doc,
+                                                        entities: msg.entities.unwrap_or_default(),
+                                                    }),
+                                                    forwarded: false,
+                                                });
+                                            }
                                         }
                                     }
-                                }
-                            } else if let Some(grammers_tl_types::enums::MessageMedia::Photo(ref photo)) = msg.media {
-                                if let Some(grammers_tl_types::enums::Photo::Photo(photo)) = &photo.photo {
+                                } else if let Some(grammers_tl_types::enums::MessageMedia::Photo(ref photo)) = msg.media {
+                                    if let Some(grammers_tl_types::enums::Photo::Photo(photo)) = &photo.photo {
+                                        return Some(Message {
+                                            id: msg.id,
+                                            src_chat_id: src_discussion.id,
+                                            dst_chat: dst_discussion.chat.clone(),
+                                            post_id: dst_discussion.request.msg_id,
+                                            data: MessageData::Media (Media {
+                                                file_name: format!("{}.jpeg", photo.id),
+                                                grouped_id: msg.grouped_id,
+                                                media: Box::new(grammers_client::types::Media::from_raw(msg.media.unwrap()).unwrap()),
+                                                caption: msg.message,
+                                                mime: MimeType::Photo,
+                                                entities: msg.entities.unwrap_or_default(),
+                                            }),
+                                            forwarded: false,
+                                        });
+                                    }
+                                } else if !msg.message.is_empty() {
                                     return Some(Message {
                                         id: msg.id,
                                         src_chat_id: src_discussion.id,
                                         dst_chat: dst_discussion.chat.clone(),
                                         post_id: dst_discussion.request.msg_id,
-                                        data: MessageData::Media (Media {
-                                            file_name: format!("{}.jpeg", photo.id),
-                                            grouped_id: msg.grouped_id,
-                                            media: Box::new(grammers_client::types::Media::from_raw(msg.media.unwrap()).unwrap()),
-                                            caption: msg.message,
-                                            mime: MimeType::Photo,
-                                            entities: msg.entities.unwrap_or_default(),
-                                        }),
+                                        data: MessageData::Text(Text { message: msg.message, entities: msg.entities.unwrap_or_default() }),
                                         forwarded: false,
                                     });
+                                } else {
+                                    dbg!(msg);
                                 }
-                            } else if !msg.message.is_empty() {
-                                return Some(Message {
-                                    id: msg.id,
-                                    src_chat_id: src_discussion.id,
-                                    dst_chat: dst_discussion.chat.clone(),
-                                    post_id: dst_discussion.request.msg_id,
-                                    data: MessageData::Text(Text { message: msg.message, entities: msg.entities.unwrap_or_default() }),
-                                    forwarded: false,
-                                });
-                            } else {
-                                dbg!(msg);
                             }
-                        }
 
-                        None
-                    }).rev().fold(std::collections::BTreeMap::<i64, MessageParsed>::new(), |mut acc, item| {
-                            match item.data {
-                                MessageData::Text(t) => {
-                                    acc.insert(item.id as i64, MessageParsed {
-                                        id: vec![item.id],
-                                        forwarded: item.forwarded,
-                                        src_chat_id: item.src_chat_id,
-                                        dst_chat: item.dst_chat,
-                                        post_id: item.post_id,
-                                        data: MessageType::Text(t),
-                                        file_paths: Vec::new(),
-                                    });
-                                },
-                                MessageData::Media(media) => {
-                                    if let Some(grouped_id) = media.grouped_id {
-                                        acc.entry(grouped_id).and_modify(|value| {
-                                            value.data.push_to_multi(media.clone());
-                                            value.id.push(item.id);
-                                        }).or_insert(MessageParsed {
-                                            id: vec![item.id],
-                                            forwarded: item.forwarded,
-                                            src_chat_id: item.src_chat_id,
-                                            dst_chat: item.dst_chat,
-                                            post_id: item.post_id,
-                                            data: MessageType::MultiMedia(vec![media]),
-                                            file_paths: Vec::new(),
-                                        });
-                                    } else {
+                            None
+                        })
+                        .fold(
+                            std::collections::BTreeMap::<i64, MessageParsed>::new(),
+                            |mut acc, item| {
+                                match item.data {
+                                    MessageData::Text(t) => {
                                         acc.insert(item.id as i64, MessageParsed {
                                             id: vec![item.id],
                                             forwarded: item.forwarded,
                                             src_chat_id: item.src_chat_id,
                                             dst_chat: item.dst_chat,
                                             post_id: item.post_id,
-                                            data: MessageType::SingleMedia(media),
+                                            data: MessageType::Text(t),
                                             file_paths: Vec::new(),
                                         });
+                                    },
+                                    MessageData::Media(media) => {
+                                        if let Some(grouped_id) = media.grouped_id {
+                                            acc.entry(grouped_id).and_modify(|value| {
+                                                value.data.push_to_multi(media.clone());
+                                                value.id.push(item.id);
+                                            }).or_insert(MessageParsed {
+                                                id: vec![item.id],
+                                                forwarded: item.forwarded,
+                                                src_chat_id: item.src_chat_id,
+                                                dst_chat: item.dst_chat,
+                                                post_id: item.post_id,
+                                                data: MessageType::MultiMedia(vec![media]),
+                                                file_paths: Vec::new(),
+                                            });
+                                        } else {
+                                            acc.insert(item.id as i64, MessageParsed {
+                                                id: vec![item.id],
+                                                forwarded: item.forwarded,
+                                                src_chat_id: item.src_chat_id,
+                                                dst_chat: item.dst_chat,
+                                                post_id: item.post_id,
+                                                data: MessageType::SingleMedia(media),
+                                                file_paths: Vec::new(),
+                                            });
+                                        }
                                     }
                                 }
-                            }
 
-                            acc
-                        }).into_values()
+                                acc
+                            })
+                        .into_values()
                      {
                         pb.inc(1);
 

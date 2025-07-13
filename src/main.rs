@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = download_rx.recv_many(&mut buffer, ctx2.config.concurrency as usize) => {
                     let mut tasks = futures::stream::FuturesOrdered::new();
-                    while let Some(mut msg) = buffer.pop() {
+                    for mut msg in buffer.drain(..) {
                         if sqlx::query_scalar!(
                             r#"
                                 select id from "message"
@@ -224,41 +224,16 @@ async fn main() -> anyhow::Result<()> {
                             match msg.data {
                                 message::MessageType::MultiMedia(ref items) => {
                                     for (idx, item) in items.iter().enumerate() {
-                                        let dir_path = format!(".tmp/{}/{}", msg.src_chat_id, msg.post_id);
-                                        tracing::debug!(target: "cc", "Start downloading file {}", msg.id[idx]);
-                                        let download_path = format!("{}/{}", dir_path, item.file_name);
                                         pb.set_message(format!("downloading file {}", item.file_name));
-                                        match client
-                                            .download_media(&*item.media, &download_path)
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                tracing::debug!(target: "cc", "Finished downloading file {}", download_path);
-                                                msg.file_paths.insert(idx, download_path);
-                                            },
-                                            Err(cause) => {
-                                                tracing::error!(target: "cc", %cause, "Error downloading file {}", download_path);
-                                            }
+                                        if let Ok(download_path) = download_with_retry(&client, item, &msg, idx).await {
+                                            msg.file_paths.insert(idx, download_path);
                                         }
                                     }
                                 },
                                 message::MessageType::SingleMedia(ref item) => {
-                                    let dir_path = format!(".tmp/{}/{}", msg.src_chat_id, msg.post_id);
-                                    tokio::fs::create_dir_all(&dir_path).await.unwrap();
-                                    tracing::debug!(target: "cc", "Start downloading file {}", msg.id[0]);
-                                    let download_path = format!("{}/{}", dir_path, item.file_name);
                                     pb.set_message(format!("downloading file {}", item.file_name));
-                                    match client
-                                        .download_media(&*item.media, &download_path)
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            tracing::debug!(target: "cc", "Finished downloading file {}", download_path);
-                                            msg.file_paths.insert(0, download_path);
-                                        },
-                                        Err(cause) => {
-                                            tracing::error!(target: "cc", %cause, "Error downloading file {}", download_path);
-                                        }
+                                    if let Ok(download_path) = download_with_retry(&client, item, &msg, 0).await {
+                                        msg.file_paths.insert(0, download_path);
                                     }
                                 }
                                 _ => unreachable!(),
@@ -276,12 +251,9 @@ async fn main() -> anyhow::Result<()> {
 
                         for (idx, file_path) in msgs.file_paths.iter().enumerate() {
                             pb.set_message(format!("uploading file {}", file_path));
-                            let uploaded_file = match ctx2.client.upload_file(file_path).await {
+                            let uploaded_file = match upload_with_retry(&ctx2.client, file_path).await {
                                 Ok(f) => f,
-                                Err(e) => {
-                                    tracing::error!(target: "cc", cause = %e, "error uploading file,");
-                                    continue;
-                                }
+                                Err(_) => continue,
                             };
                             tokio::fs::remove_dir_all(file_path).await.ok();
                             pb.finish_and_clear();
@@ -314,29 +286,30 @@ async fn main() -> anyhow::Result<()> {
     let mut shutdown_rx2 = shutdown_tx.subscribe();
     tasks.spawn(async move {
         let mut buffer = Vec::with_capacity(5);
-        buffer.sort_by(|a: &(_, _, i32, _), b: &(_, _, i32, _)| (a.2).cmp(&b.2));
         loop {
             tokio::select! {
                 _ = send_rx.recv_many(&mut buffer, 5) => {
-                    while let Some((chat, msg, msg_id, chat_id)) = buffer.pop() {
-                        if let Err(e) = ctx3.client.send_message(chat, msg).await {
-                            tracing::error!(target: "cc", cause = %e, "error sending file,");
-                            continue;
+                    buffer.sort_by(|a: &(_, _, i32, _), b: &(_, _, i32, _)| (a.2).cmp(&b.2));
+                    for (chat, msg, msg_id, chat_id) in buffer.drain(..) {
+                        match send_with_retry(&ctx3.client, &chat, msg).await {
+                            Ok(_) => {
+                                sqlx::query!(
+                                    r#"
+                                        insert into "message"
+                                        values ($1, $2, $3, $4)
+                                        on conflict do update set forwarded = excluded.forwarded;
+                                    "#,
+                                    msg_id,
+                                    chat_id,
+                                    1,
+                                    1,
+                                )
+                                .execute(&ctx3.db)
+                                .await
+                                .ok();
+                            }
+                            Err(_) => continue,
                         }
-                        sqlx::query!(
-                            r#"
-                                insert into "message"
-                                values ($1, $2, $3, $4)
-                                on conflict do update set forwarded = excluded.forwarded;
-                            "#,
-                            msg_id,
-                            chat_id,
-                            1,
-                            1,
-                        )
-                        .execute(&ctx3.db)
-                        .await
-                        .ok();
                     }
                 }
                 _ = shutdown_rx2.recv() => {
@@ -537,71 +510,36 @@ async fn copy_messages(
                     .fmt_entities(msg.entities.unwrap_or_default())
             };
 
-            loop {
-                match ctx
-                    .client
-                    .send_message(&dst_chat.chat, input_message.clone())
-                    .await
-                {
-                    Ok(sent_message) => {
-                        pb.inc(1);
+            match send_with_retry(&ctx.client, &dst_chat.chat, input_message.clone()).await {
+                Ok(sent_message) => {
+                    pb.inc(1);
 
-                        sqlx::query!(
-                            r#"
-                                insert into "message"
-                                values ($1, $2, $3, $4)
-                                on conflict do update set forwarded = excluded.forwarded;
-                            "#,
-                            msg.id,
-                            chat_id,
-                            downloaded,
-                            1,
-                        )
-                        .execute(&ctx.db)
-                        .await?;
+                    sqlx::query!(
+                        r#"
+                            insert into "message"
+                            values ($1, $2, $3, $4)
+                            on conflict do update set forwarded = excluded.forwarded;
+                        "#,
+                        msg.id,
+                        chat_id,
+                        downloaded,
+                        1,
+                    )
+                    .execute(&ctx.db)
+                    .await?;
 
-                        count += 1;
-                        message::Message::process_new_messages(
-                            ctx,
-                            discussion,
-                            // src_chat.chat.id(),
-                            &dst_chat.chat,
-                            sent_message.id(),
-                        )
-                        .await?;
-                        break;
-                    }
-                    Err(err) => match err {
-                        grammers_client::InvocationError::Rpc(rpc_error)
-                            if rpc_error.name == "FLOOD_WAIT" =>
-                        {
-                            tracing::error!(target: "cc", "Error sending message: {rpc_error}");
-                            let wait_time = rpc_error.value.unwrap_or(60) as u64;
-
-                            tracing::info!(target: "cc", "Sleeping for {wait_time}s...💤");
-                            tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
-                        }
-                        err => {
-                            tracing::error!(target: "cc", "Unrecoverable error sending message: {err}");
-                            sqlx::query!(
-                                r#"
-                                    update "chat"
-                                    set offset_id   = $2,
-                                        min_id      = $2,
-                                        hash        = $3
-                                    where id = $1;
-                                "#,
-                                chat_id,
-                                msg.id,
-                                0,
-                            )
-                            .execute(&ctx.db)
-                            .await?;
-
-                            return Err(anyhow::Error::msg(err));
-                        }
-                    },
+                    count += 1;
+                    message::Message::process_new_messages(
+                        ctx,
+                        discussion,
+                        // src_chat.chat.id(),
+                        &dst_chat.chat,
+                        sent_message.id(),
+                    )
+                    .await?;
+                    break;
                 }
+                Err(err) => return Err(err),
             }
         }
     }
@@ -675,14 +613,14 @@ where
                     grammers_client::InvocationError::Rpc(rpc_error)
                         if rpc_error.name == "FLOOD_WAIT" =>
                     {
-                        tracing::error!(target: "cc", "Error sending message: {rpc_error}");
-                        let wait_time = rpc_error.value.unwrap_or(60) as u64;
+                        let wait = rpc_error.value.unwrap_or(60) as u64;
+                        tracing::warn!(target: "cc", "FLOOD_WAIT {wait}s while invoking request; retrying");
 
-                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
                         continue;
                     }
                     err => {
-                        tracing::error!(target: "cc", "Unrecoverable error sending message: {err}");
+                        tracing::error!(target: "cc", "Unrecoverable error invoking request: {err}");
 
                         return Err(err);
                     }
@@ -690,5 +628,101 @@ where
             };
 
         return res;
+    }
+}
+
+pub async fn download_with_retry(
+    client: &grammers_client::Client,
+    item: &crate::message::Media,
+    msg: &message::MessageParsed,
+    idx: usize,
+) -> anyhow::Result<String> {
+    loop {
+        let dir_path = format!(".tmp/{}/{}", msg.src_chat_id, msg.post_id);
+        tracing::debug!(target: "cc", "Start downloading file {}", msg.id[idx]);
+        let download_path = format!("{}/{}", dir_path, item.file_name);
+        match client
+            .download_media(&*item.media, &download_path)
+            .await
+        {
+            Ok(_) => {
+                tracing::debug!(target: "cc", "Finished downloading file {}", download_path);
+
+                return Ok(download_path);
+            },
+            Err(cause) => {
+                if let Some(inv) = cause.get_ref()
+                    .and_then(|boxed| boxed.downcast_ref::<grammers_client::InvocationError>())
+                {
+                    if let grammers_client::InvocationError::Rpc(rpc) = inv {
+                        if rpc.name == "FLOOD_WAIT" {
+                            let wait = rpc.value.unwrap_or(60) as u64;
+                            tracing::warn!(target:"cc", "FLOOD_WAIT {wait}s while downloading; retrying");
+                            tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                        }
+                    } else {
+                        tracing::error!(target: "cc", "Unrecoverable error downloading file: {cause}");
+                        return Err(anyhow::Error::msg(cause));
+                    }
+                } else {
+                    tracing::error!(target: "cc", "Unrecoverable error downloading file: {cause}");
+                    return Err(anyhow::Error::msg(cause));
+                }
+            }
+        }
+    }
+}
+
+pub async fn upload_with_retry(
+    client: &grammers_client::Client,
+    file_path: &str,
+) -> anyhow::Result<grammers_client::types::media::Uploaded> {
+    loop {
+        let res = client.upload_file(file_path).await;
+        match res {
+            Ok(media) => return Ok(media),
+            Err(cause) => {
+                if let Some(inv) = cause.get_ref()
+                    .and_then(|boxed| boxed.downcast_ref::<grammers_client::InvocationError>())
+                {
+                    if let grammers_client::InvocationError::Rpc(rpc) = inv {
+                        if rpc.name == "FLOOD_WAIT" {
+                            let wait = rpc.value.unwrap_or(60) as u64;
+                            tracing::warn!(target:"cc", "FLOOD_WAIT {wait}s while uploading; retrying");
+                            tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                        }
+                    } else {
+                        tracing::error!(target: "cc", "Unrecoverable error uploading file: {cause}");
+                        return Err(anyhow::Error::msg(cause));
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub async fn send_with_retry(
+    client: &grammers_client::Client,
+    chat: &grammers_client::types::Chat,
+    msg: grammers_client::types::InputMessage,
+) -> anyhow::Result<grammers_client::types::Message> {
+    loop {
+        match client.send_message(chat, msg.clone()).await {
+            Ok(msg) => return Ok(msg),
+            Err(err) => match err {
+                grammers_client::InvocationError::Rpc(rpc_error)
+                    if rpc_error.name == "FLOOD_WAIT" =>
+                {
+                    let wait = rpc_error.value.unwrap_or(60) as u64;
+                    tracing::warn!(target:"cc", "FLOOD_WAIT {wait}s while sending message; retrying");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                }
+                err => {
+                    tracing::error!(target: "cc", "Unrecoverable error sending message: {err}");
+
+                    return Err(anyhow::Error::msg(err));
+                }
+            }
+        }
     }
 }
